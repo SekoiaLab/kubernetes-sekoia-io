@@ -16,4 +16,4 @@ ENV FLUENTD_OPTS=""
 
 COPY entrypoint.sh /fluentd/entrypoint.sh
 
-CMD ["tini", "--", "/fluentd/entrypoint.sh"]
+ENTRYPOINT ["tini", "--", "/fluentd/entrypoint.sh"]
