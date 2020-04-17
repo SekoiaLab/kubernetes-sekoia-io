@@ -6,7 +6,7 @@ RUN apk add --no-cache --update --virtual .build-deps sudo build-base ruby-dev b
 
 RUN \
     fluent-gem install fluent-plugin-kubernetes_metadata_filter && \
-    fluent-gem install fluent-plugin-sekoia-io && \
+    fluent-gem install fluent-plugin-sekoia-io -v 0.0.3 && \
     fluent-gem install fluent-plugin-prometheus
 
 WORKDIR /fluentd
