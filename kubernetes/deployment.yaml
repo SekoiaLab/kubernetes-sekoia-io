@@ -1,0 +1,175 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: send-events-to-sekoia-io
+  namespace: kube-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRole
+metadata:
+  name: send-events-to-sekoia-io
+  namespace: kube-system
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  - namespaces
+  verbs:
+  - get
+  - list
+  - watch
+
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: send-events-to-sekoia-io
+  namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: send-events-to-sekoia-io
+  apiGroup: rbac.authorization.k8s.io
+subjects:
+- kind: ServiceAccount
+  name: send-events-to-sekoia-io
+  namespace: kube-system
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: send-events-to-sekoia-io
+  namespace: kube-system
+  labels:
+    service: send-events-to-sekoia-io
+    app: fluentd
+spec:
+  selector:
+    matchLabels:
+      app: fluentd
+      service: send-events-to-sekoia-io
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "24231"
+      labels:
+        app: fluentd
+        service: send-events-to-sekoia-io
+    spec:
+      serviceAccountName: send-events-to-sekoia-io
+      terminationGracePeriodSeconds: 30
+
+      volumes:
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
+      - name: config
+        configMap:
+          name: send-events-to-sekoia-io
+
+      containers:
+      - name: fluentd
+        imagePullPolicy: Always
+        image: sekoialab/kubernetes-sekoia-io:0.0.6
+        envFrom:
+        - configMapRef:
+            name: send-events-to-sekoia-io
+        resources:
+          limits:
+            memory: 500Mi
+            cpu: 300m
+          requests:
+            memory: 500Mi
+            cpu: 300m
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+        - name: config
+          mountPath: /fluentd/etc/
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: send-events-to-sekoia-io
+  namespace: kube-system
+data:
+  fluent.conf: |
+    @include kubernetes.conf
+    @include prometheus.conf
+    @include conf.d/*.conf
+
+    <match kubernetes.**>
+      @type sekoia
+      host "#{ENV['DEST_HOST'] || 'intake.sekoia.io'}"
+      port "#{ENV['DEST_PORT'] || '10514'}"
+      <buffer>
+        @type memory
+        flush_interval 10s
+      </buffer>
+    </match>
+
+  kubernetes.conf: |
+    <source>
+      @type tail
+      @id in_tail_container_logs
+      path /var/log/containers/*.log
+      pos_file /var/log/fluentd-containers.log.pos
+      tag kubernetes.*
+      read_from_head true
+      enable_stat_watcher false
+      <parse>
+        @type json
+        time_format %Y-%m-%dT%H:%M:%S.%NZ
+      </parse>
+    </source>
+
+    # add kubernetes metadata on the event
+    # add annotation sekoia-io... if present
+    <filter kubernetes.**>
+      @type kubernetes_metadata
+      @id filter_kube_metadata
+      annotation_match ["sekoia-io-intake-key"]
+    </filter>
+
+    # drop all events originating from service send-events-to-sekoia-io in
+    # order to not eat the same logs in a loop (the logs of the current
+    # container are written in the same path as the other logs).
+    <filter kubernetes.**>
+      @type grep
+      <exclude>
+        key $.kubernetes.labels.service
+        pattern /send-events-to-sekoia-io/
+      </exclude>
+    </filter>
+
+    # filter out events that doesn't contain an intake-key
+    <filter kubernetes.**>
+      @type grep
+      <regexp>
+        key $.kubernetes.annotations.sekoia-io-intake-key
+        pattern /[A-Za-z0-9]+/
+      </regexp>
+    </filter>
+
+  prometheus.conf: |
+    <source>
+      @type prometheus
+      bind "#{ENV['FLUENTD_PROMETHEUS_BIND'] || '0.0.0.0'}"
+      port "#{ENV['FLUENTD_PROMETHEUS_PORT'] || '24231'}"
+      metrics_path "#{ENV['FLUENTD_PROMETHEUS_PATH'] || '/metrics'}"
+    </source>
+
+    <source>
+      @type prometheus_output_monitor
+    </source>
